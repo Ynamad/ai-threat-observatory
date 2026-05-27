@@ -18,3 +18,5 @@ vector_store.py = stockage vectoriel
 6. endpoint de similarité
 7. tests
 8. documentation
+
+The AI enrichment module uses a normalized internal vulnerability schema instead of coupling the enrichment logic to a specific external feed format. Source-specific adapters can map records from the Cybersecurity Data Space, Vulnerability-Lookup, CIRCL CVE feeds or other advisory sources into this internal schema before embedding generation and vector storage.
