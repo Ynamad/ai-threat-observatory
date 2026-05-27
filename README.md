@@ -1,7 +1,6 @@
 # ai-threat-observatory
 
-
-http://localhost:6333
+http://localhost:6333/dashboard
 
 # Rôles
 routes.py = couche HTTP
