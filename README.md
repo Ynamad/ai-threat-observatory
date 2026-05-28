@@ -2,13 +2,13 @@
 
 http://localhost:6333/dashboard
 
-# Rôles
+## Rôles
 routes.py = couche HTTP
 enrichment_service.py = logique métier
 embedding_service.py = IA
 vector_store.py = stockage vectoriel
 
-# Ordre logique :
+## Ordre logique :
 1. API démarre
 2. modèles de données
 3. embeddings
