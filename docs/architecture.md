@@ -511,10 +511,477 @@ These results can then be displayed in the Cybersecurity Observatory or used by 
 
 ## 9. Security Concerns
 
+The AI enrichment service processes vulnerability intelligence data and may later support advisory drafting workflows. Security controls are therefore required at several levels: API access, data validation, model usage, storage and operational monitoring.
+
+### 9.1 API Security
+
+Authentication and authorization should be enforced at the API boundary, before requests reach the enrichment pipeline.
+
+The enrichment and search endpoints do not have the same security impact:
+
+- `POST /vulnerabilities/enrich` modifies the semantic index. It should therefore be restricted to trusted services such as the Vulnerability-Lookup adapter, internal ingestion jobs or authorized analysts. Without access control, an attacker or unauthorized user could pollute the vector index with false vulnerability records, degrade retrieval quality, create duplicates, trigger excessive embedding workloads or store unwanted content.
+
+- `POST /vulnerabilities/search` does not modify the index, but it can still reveal sensitive operational context. Even when vulnerability data is public, the queries made by analysts and the correlations returned by the system may reveal which technologies, sectors, products or threats are being monitored in the Luxembourg context.
+
+Recommended controls:
+
+- restrict access to trusted internal services and analysts;
+- add authentication, for example API keys, OAuth2 or reverse-proxy authentication;
+- apply role-based access control to separate ingestion, search and administration permissions;
+- rate-limit endpoints to prevent abuse or denial-of-service scenarios;
+- validate request payload size to prevent excessive memory usage.
+
+The V1 exposes local development endpoints only. A production deployment should place the API behind an authenticated gateway or internal network boundary.
+
+### 9.2 Input Validation
+
+Incoming vulnerability records must be validated before enrichment.
+
+The V1 uses Pydantic models to validate the normalized `VulnerabilityRecord` schema. This helps ensure that required fields are present and that fields such as `cvss_score` remain within expected bounds.
+
+Additional production validation should include:
+
+- maximum field lengths;
+- accepted language codes;
+- accepted source names;
+- protection against malformed JSON;
+- rejection of empty or low-quality descriptions;
+- schema versioning for adapter compatibility.
+
+### 9.3 Data Integrity
+
+The service should preserve traceability between the enriched vector record and the original vulnerability source.
+
+Recommended controls:
+
+- keep the original `vulnerability_id`;
+- keep the source name stored in the Qdrant payload;
+- maintain ingestion timestamps;
+- track adapter version and schema version;
+- use deterministic point IDs to avoid duplicate records during re-ingestion.
+
+This allows analysts to trace semantic search results back to their original structured vulnerability records.
+
+### 9.4 Model and Prompt Security
+
+If generative advisory drafting is added, prompt injection and hallucination risks must be controlled.
+
+Potential risks include:
+
+- malicious content in vulnerability descriptions;
+- source data attempting to influence the model instructions;
+- hallucinated remediation guidance;
+- unsupported claims in generated advisories.
+
+Mitigations:
+
+- use retrieval-augmented generation with explicit source references;
+- separate system instructions from retrieved vulnerability content;
+- sanitize and delimit retrieved context;
+- require human review before publication;
+- log model inputs and outputs for auditability.
+
+### 9.5 Sensitive Information
+
+The system should avoid indexing sensitive information that is not required for correlation.
+
+If internal asset data is later used for Luxembourg-specific prioritization, additional controls are required:
+
+- access control on asset-related metadata;
+- separation between public vulnerability data and internal exposure data;
+- encryption at rest for sensitive metadata;
+- audit logs for analyst access;
+- data minimization in vector payloads.
+
+### 9.6 Logging and Operational Data Exposure
+
+Although many vulnerability records are public, the operational context around them may be sensitive.
+
+
+For example, logs may reveal:
+
+- analyst queries;
+- local prioritization signals;
+- sectors, technologies or products being monitored;
+- internal asset or exposure context if added later;
+- connector credentials or API tokens;
+- future LLM prompts and generated drafts.
+
+For this reason, logs should support debugging without storing unnecessary operational context. They should favor technical identifiers, timestamps, source names, status codes and error details over full request payloads or complete generated outputs.
+
+Recommended controls:
+
+- avoid logging full request and response bodies by default;
+- redact credentials, tokens and secrets;
+- avoid logging full analyst prompts unless explicitly required for audit;
+- use request identifiers to correlate events without duplicating payloads;
+- define log retention policies;
+- restrict access to logs.
+
+### 9.7 Vector Database Security
+
+Qdrant should not be exposed directly to external clients. It should remain private and only be accessed by the `VectorStore` component.
+
+In production, Qdrant could run on an internal server, in a cloud environment, in Kubernetes, in Docker Compose on a virtual machine, or inside a shared network. In these deployment contexts, the Qdrant API port should not be directly exposed to external clients.
+
+The intended access path is:
+
+```text
+Client
+    → FastAPI API
+    → EnrichmentService
+    → VectorStore
+    → Qdrant
+```
+Direct access should be avoided:
+```text
+External client
+    → Qdrant
+```
+Exposing Qdrant directly would allow clients to bypass the API validation, authorization and business logic layers. Depending on permissions, this could lead to unauthorized reads, vector index pollution, deletion or modification of stored points, excessive query load or leakage of payload metadata.
+
+Recommended controls:
+
+- do not expose Qdrant directly to the public internet;
+- restrict Qdrant access to the enrichment service;
+- enable authentication where available;
+- isolate the vector database in a private network;
+- back up collections regularly;
+- monitor collection size, query volume and failure rates.
+
+### 9.8 Supply Chain Security
+
+The system depends on open-source components such as FastAPI, sentence-transformers, Qdrant client and embedding models.
+
+Recommended controls:
+
+- pin dependency versions;
+- scan dependencies for vulnerabilities;
+- document model sources and licenses;
+- verify model provenance;
+- avoid untrusted model weights;
+- review Docker images before deployment.
+
 ## 10. Scaling Assumptions
+
+The proposed architecture is designed to start as a lightweight enrichment service and evolve toward a scalable production component.
+
+### 10.1 Expected Workload
+
+The system has two main workload types:
+
+- ingestion workload: vulnerability records are normalized, embedded and stored in Qdrant;
+- search workload: analyst queries or downstream services request semantically similar vulnerabilities.
+
+These workloads have different scaling characteristics.
+
+Ingestion can usually be processed asynchronously or in batches. Search is more latency-sensitive because it is part of an analyst-facing workflow.
+
+### 10.2 API Scaling
+
+The FastAPI layer can be scaled horizontally by running multiple API workers behind a load balancer.
+
+This is possible because the API layer should remain stateless. The persistent state is stored outside the API process:
+
+- semantic vectors and payloads are stored in Qdrant;
+- original vulnerability intelligence remains in Vulnerability-Lookup or another primary source;
+- configuration should be provided through environment variables or deployment configuration.
+
+### 10.3 Embedding Scaling
+
+Embedding generation is one of the main compute bottlenecks.
+
+For small to medium workloads, CPU inference with a lightweight sentence-transformers model may be sufficient. For larger volumes, the system can evolve toward:
+
+- batch embedding during ingestion;
+- asynchronous enrichment jobs;
+- dedicated embedding workers;
+- GPU-backed inference for larger models;
+- model caching at service startup;
+- queue-based processing for high-volume feeds.
+
+Embedding results should be reused when the vulnerability content has not changed.
+
+For large-scale batch workloads, the enrichment pipeline could also be executed through HPC or job-scheduler based infrastructure. This would be relevant for historical backfills, large embedding regeneration campaigns after a model migration, large-scale evaluation runs, or enrichment of high-volume vulnerability datasets. In that case, FastAPI would remain the interactive API layer, while scheduled batch jobs would run the embedding pipeline offline and write enriched vectors into Qdrant.
+
+### 10.4 Qdrant Scaling
+
+Qdrant is used as the vector index for semantic retrieval.
+
+Scaling considerations include:
+
+- collection size;
+- vector dimension and embedding model version;
+- indexing configuration;
+- query latency and concurrent search requests;
+- backup and recovery requirements.
+
+For a production deployment, Qdrant should be monitored and sized according to the expected number of vulnerability records and query volume.
+
+For large-scale deployments, separate Qdrant collections can be used when there is a clear operational boundary, such as severity, data sensitivity, or environment. For example, critical and high-severity vulnerabilities could be stored in a dedicated collection to support faster analyst workflows focused on urgent threats, while medium and low-severity vulnerabilities could remain in a broader collection for general investigation.
+
+A collection selection layer could route ingestion and search requests to the appropriate collection. However, collections should not be split prematurely based only on semantic proximity, as this can reduce recall and add routing complexity. 
+
+Using smaller, well-scoped collections can improve semantic search latency by reducing the number of vectors searched and simplifying index management. This is useful when collections are separated by stable and relevant operational boundaries. However, collections should not be split prematurely based only on semantic proximity, as this may reduce recall and add routing complexity.
+
+If multiple embedding models or model versions are used, separate collections should be created to avoid mixing incompatible vector spaces.
+
+
+### 10.5 Ingestion Scaling
+
+The ingestion pipeline should support both incremental updates and historical backfills.
+
+Recommended ingestion modes:
+
+- incremental ingestion for new or updated vulnerabilities;
+- scheduled synchronization from Vulnerability-Lookup;
+- batch ingestion for historical datasets;
+- dead-letter handling for invalid or malformed records;
+- idempotent upserts to avoid duplicate vectors.
+
+The current deterministic upsert strategy supports re-ingestion without creating duplicate Qdrant points.
+
+### 10.6 Search Scaling
+
+Similarity search should remain responsive for analyst workflows.
+
+Recommended search controls:
+
+- use a lightweight embedding model that provides an acceptable trade-off between semantic retrieval quality and query latency.
+- limit the number of returned results;
+- apply rate limits on public or shared endpoints;
+- use appropriate Qdrant indexing parameters;
+- avoid storing user queries;
+- monitor latency percentiles, not only average latency.
+
+Use smaller, well-scoped Qdrant collections is relevant to reduce the searched vector space and improve query latency.
+
+### 10.7 Deployment Assumptions
+
+For a first production iteration, the system can remain relatively simple:
+
+* one FastAPI service;
+* one Qdrant instance;
+* scheduled ingestion;
+* lightweight multilingual embedding model;
+* internal network deployment.
+
+The architecture can then evolve progressively as ingestion volume, query volume and model complexity increase.
 
 ## 11. Observability
 
+Observability is required to ensure that the enrichment service remains reliable, explainable and useful over time. The goal is not only to monitor whether the API is running, but also whether the AI-assisted retrieval pipeline continues to return relevant results.
+
+### 11.1 Application Metrics
+
+The service should expose standard application metrics, such as:
+
+- request count by endpoint;
+- request latency by endpoint;
+- error rate;
+- number of enriched vulnerabilities;
+- number of similarity search requests;
+- embedding generation latency;
+- Qdrant query latency.
+
+These metrics help detect performance regressions, service overload or abnormal usage patterns.
+
+### 11.2 Ingestion Monitoring
+
+The ingestion pipeline should track whether records are processed correctly.
+
+Useful metrics include:
+
+- number of records ingested;
+- number of records rejected during validation;
+- number of failed enrichment operations;
+- number of updated records versus newly inserted records;
+- ingestion latency;
+- source distribution of ingested records.
+
+This helps identify broken adapters, malformed source data or unexpected feed changes.
+
+### 11.3 Retrieval Quality Monitoring
+
+Because the system relies on semantic search, functional correctness cannot be measured only through uptime.
+
+The following signals should be monitored:
+
+- average similarity scores;
+- distribution of similarity scores over time;
+- number of empty or low-confidence result sets;
+- analyst feedback on returned results;
+- changes in top-k retrieval quality after adding a new source or changing the embedding model.
+
+A sudden drop in similarity scores or analyst feedback quality may indicate a feed quality issue, a model mismatch or a problem in the normalization layer.
+
+### 11.4 Logging
+
+Logs should support debugging without exposing unnecessary sensitive information.
+
+logs:
+
+- request identifier;
+- endpoint called;
+- model name and collection name used for enrichment.
+- source of ingested records;
+- vulnerability identifier;
+- validation failures;
+- enrichment failures;
+- Qdrant operation failures;
+
+Logs should avoid storing full sensitive payloads unless there is a clear operational need.
+
+### 11.5 Tracing
+
+For production deployment, distributed tracing can help understand where latency or failures occur.
+
+A trace should make it possible to follow a request across the full enrichment pipeline and identify whether latency or failures come from API handling, embedding inference, vector storage or Qdrant search operations.
+
+This is useful when diagnosing whether a slowdown comes from API handling, embedding inference, vector search or database operations.
+
+### 11.6 Alerting
+
+Alerts should focus on operational reliability and AI quality signals.
+
+Examples:
+
+* API error rate above threshold;
+* Qdrant unavailable;
+* embedding model loading failure;
+* search latency above threshold;
+* ingestion failure spike;
+* unexpected drop in average similarity scores.
+
+This ensures that both infrastructure issues and AI retrieval quality issues are detected early.
+
 ## 12. Evaluation Metrics
 
+Evaluation should verify that the AI enrichment module is useful for analysts, not only that it runs correctly. The V1 should mainly be evaluated on semantic retrieval quality, data quality and operational performance.
+
+### 12.1 Retrieval Quality
+
+The core AI capability of the V1 is similarity search. It should be evaluated with a small benchmark made of vulnerability queries and expected related records.
+
+Relevant metrics include:
+
+- **Precision@k**: how many of the top-k returned vulnerabilities are relevant;
+- **Recall@k**: measures whether the system is able to retrieve known related vulnerabilities within the top-k results.
+- **Mean Reciprocal Rank (MRR)**: whether the first relevant result appears high in the ranking;
+- **low-confidence result rate**: how often the system returns weak or irrelevant matches.
+
+These metrics help determine whether the embedding model and normalization strategy produce meaningful semantic correlations.
+
+### 12.2 Analyst Feedback
+
+Quantitative retrieval metrics should be complemented with analyst feedback.
+
+Analysts should be able to indicate whether returned vulnerabilities are useful, too broad, too narrow or missing important related records. This feedback can later be used to improve normalization rules, model selection, search thresholds and ranking logic.
+
+### 12.3 Data Quality
+
+Poor input data directly degrades embedding quality. The system should therefore monitor whether ingested records contain enough usable information for semantic search.
+
+Important indicators include:
+
+- missing or very short descriptions;
+- malformed records;
+- inconsistent severity values;
+- duplicate vulnerability identifiers;
+- language distribution;
+- source distribution;
+- validation rejection rate.
+
+These signals help detect feed or adapter issues before they degrade retrieval quality.
+
+### 12.4 Operational Performance
+
+The service should also be evaluated as a production component.
+
+The most relevant operational metrics are:
+
+- API latency;
+- embedding generation latency;
+- Qdrant query latency;
+- ingestion throughput;
+- search throughput;
+- API error rate;
+- Qdrant availability.
+
+These metrics help determine whether the architecture can support larger ingestion volumes and analyst-facing search workflows.
+
+### 12.5 Generative Drafting Evaluation
+
+If advisory drafting is added later, the evaluation must focus on factual correctness rather than writing fluency.
+
+Generated drafts should be reviewed for consistency with source vulnerability data, correct severity wording, absence of unsupported claims, clarity of remediation guidance, multilingual quality and analyst editing effort.
+
+The generative model should remain human-in-the-loop, especially for public advisories or Luxembourg-specific prioritization.
+
+### 12.6 Regression Checks
+
+Evaluation should be repeated before major changes, especially when changing the embedding model, adding a new feed, modifying normalization logic or updating drafting prompts.
+
+This prevents silent regressions in retrieval quality or advisory drafting behavior.
+
 ## 13. Maintainability and Two-Year Relevance
+
+The proposed architecture is designed to remain maintainable and relevant over the next two years by avoiding tight coupling between external feeds, AI models, storage technology and API logic.
+
+### 13.1 Modular Design
+
+The system separates responsibilities into dedicated components:
+
+- the API layer handles HTTP requests and responses;
+- the adapter layer handles source-specific normalization;
+- the enrichment service orchestrates the pipeline;
+- the embedding service handles model inference;
+- the vector store abstracts Qdrant operations.
+
+This makes the system easier to test, debug and evolve. A change in one layer should not require rewriting the entire service.
+
+### 13.2 Source-Agnostic Ingestion
+
+The enrichment module relies on the normalized `VulnerabilityRecord` schema rather than raw external formats.
+
+This is important because external vulnerability sources may evolve over time. If the Vulnerability-Lookup API, Cybersecurity Data Space datasets or another feed changes format, only the corresponding adapter should need to be updated.
+
+### 13.3 Model-Agnostic AI Layer
+
+The embedding model is encapsulated inside `EmbeddingService`.
+
+This allows the system to switch from one sentence-transformers model to another without changing the API or business logic. This is important because embedding models are likely to improve significantly over the next two years, especially for multilingual and cybersecurity-specific retrieval.
+
+If the embedding model changes, vectors should be regenerated into a new versioned Qdrant collection to avoid mixing incompatible vector spaces.
+
+### 13.4 Separation Between Retrieval and Generation
+
+The V1 focuses on semantic enrichment and similarity search. Generative advisory drafting is treated as a downstream capability.
+
+This separation is important because retrieval and generation have different risks, costs and evaluation methods. The retrieval layer can remain stable while generative models evolve.
+
+### 13.5 Human-in-the-Loop by Design
+
+The system is designed to assist analysts, not replace them.
+
+For cybersecurity use cases, human review remains necessary for severity interpretation, remediation guidance, public advisory publication and Luxembourg-specific prioritization.
+
+This makes the system more realistic and safer to operate in a professional environment.
+
+### 13.6 Future-Proofing
+
+The architecture can evolve progressively with:
+
+- a dedicated Vulnerability-Lookup API client for automated synchronization;
+- additional source adapters for new vulnerability feeds;
+- production security controls such as authentication, authorization, rate limiting and network isolation;
+- observability metrics for API latency, embedding latency, Qdrant query latency, ingestion failures and retrieval confidence;
+- evaluation pipelines for retrieval quality, analyst feedback and regression testing before model or feed changes;
+- generative advisory drafting with human review;
+- analyst feedback loops to continuously improve retrieval relevance;
+- asynchronous ingestion workers for large feeds and historical backfills;
+- larger-scale deployment using job schedulers, containers, Kubernetes or HPC infrastructure;
+- versioned Qdrant collections for embedding model migrations;
+- CI/CD pipelines with automated tests, dependency scanning and deployment checks.
+
+The key design principle is to keep each part replaceable. This allows the system to adapt to new feeds, new models, new deployment constraints, new security requirements and new observatory needs without requiring a full rewrite.
