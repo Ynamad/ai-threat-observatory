@@ -48,7 +48,13 @@ ai-threat-observatory/
 ├── docs/
 │   └── architecture.md
 ├── tests/
-│   └── test_vulnerability_lookup_adapter.py
+│   ├── test_api_enrichment.py
+│   ├── test_embedding_service.py
+│   ├── test_embedding_service.py
+│   ├── test_enrichment_service.py
+│   ├── test_health.py
+│   ├── test_vulnerability_lookup_adapter.py
+│   └── test_vulnerability_model.py
 ├── docker-compose.yml
 ├── pytest.ini
 ├── requirements.txt
