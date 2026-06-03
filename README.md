@@ -50,9 +50,9 @@ ai-threat-observatory/
 ├── tests/
 │   ├── test_api_enrichment.py
 │   ├── test_embedding_service.py
-│   ├── test_embedding_service.py
 │   ├── test_enrichment_service.py
 │   ├── test_health.py
+│   ├── test_vector_store.py
 │   ├── test_vulnerability_lookup_adapter.py
 │   └── test_vulnerability_model.py
 ├── docker-compose.yml
